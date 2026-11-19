@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Nova</title>
+<style>
+  :root { --u: min(9.5vw, 11vh); --blue: #2fb4ff; --blue2: #0a6cff; }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; background: #000; overflow: hidden; color: #9fd6ff;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; cursor: pointer; user-select: none; }
+
+  #cv { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  /* ---------- quiet UI ---------- */
+  #cap { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 9vh); transform: translateX(-50%);
+    width: min(82vw, 620px); text-align: center; font-size: clamp(14px, 2.2vmin, 19px); line-height: 1.45;
+    color: #5f93b5; transition: opacity .3s; pointer-events: none; }
+  #cap.bot { color: #a9dcff; }
+  #cap.dim { opacity: .45; }
+
+  .ctl { position: fixed; bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); background: none;
+    border: 1px solid #12324a; color: #4d86aa; border-radius: 99px; padding: 7px 14px; font-size: 13px;
+    cursor: pointer; opacity: .6; }
+  .ctl:hover, .ctl:focus-visible { opacity: 1; border-color: #2fb4ff; outline: none; }
+  #btnMic  { left: 14px; }
+  #btnLang { right: 14px; }
+  #btnMic.off { color: #ff7a7a; border-color: #4a1d1d; }
+
+  #txt { display: none; position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 14px);
+    transform: translateX(-50%); width: min(70vw, 420px); background: #000; border: 1px solid #12324a;
+    color: #cfeaff; padding: 9px 14px; border-radius: 99px; font-size: 15px; }
+  #txt:focus { outline: none; border-color: #2fb4ff; }
+
+</style>
+</head>
+<body>
+<div id="stage" aria-label="Nova, a voice assistant. Tap to wake."><canvas id="cv"></canvas></div>
+<div id="cap" class="dim">tap anywhere to wake me</div>
+<button class="ctl" id="btnMic" title="Mute / unmute the mic">mic on</button>
+<button class="ctl" id="btnLang" title="Language I listen for">EN</button>
+<input id="txt" type="text" placeholder="Type to Nova and press Enter" autocomplete="off">
+
+<script>
+(() => {
+  // Where the Node backend lives. Leave '' when the Node server serves this page itself.
+  // Hosting this file elsewhere (GitHub Pages etc.)? put your backend URL, e.g. 'https://your-app.onrender.com'
+  const API_BASE = 'https://nova-rwz7.onrender.com';
+  const $ = (s) => document.querySelector(s);
+  const cap = $('#cap');
+  const btnMic = $('#btnMic'), btnLang = $('#btnLang'), txt = $('#txt');
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+  const LANGS = [
+    { code: 'en-IN', tts: 'en-US', label: 'EN',  hello: "Hey! I'm awake. Talk to me!" },
+    { code: 'hi-IN', tts: 'hi-IN', label: 'हि',  hello: 'अरे! मैं जाग गया। मुझसे बात करो!' },
+    { code: 'mr-IN', tts: 'mr-IN', label: 'मरा', hello: 'अरे! मी जागा झालो. माझ्याशी बोला!' },
+  ];
+  let li = 0;
+
+  /* ---------- eye renderer: canvas, hi-DPI, spring physics ---------- */
+  let needDraw = true;
+  const cv = $('#cv');
+  const ctx = cv.getContext('2d', { alpha: false, desynchronized: true });
+  let W = 0, H = 0, dpr = 1, U = 80;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    needDraw = true;
+    W = innerWidth; H = innerHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    U = Math.min(W * .10, H * .125);
+  }
+  addEventListener('resize', resize); resize();
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const BASE = { w: 3, h: 3, rr: .4, top: 0, bot: 0, tilt: 0, y: 0 };
+  const LINE = { w: 3.2, h: .3, rr: .6 };            // closed eye = thin line
+  const E = {
+    neutral:   {},
+    happy:     { h: 2.8, bot: .5 },
+    laugh:     { h: 2.7, bot: .55, fx: 'laugh' },
+    love:      { h: 3.1, bot: .45, fx: 'love' },
+    sad:       { h: 3, top: .36, tilt: -20, y: .3, fx: 'cry' },
+    angry:     { h: 2.9, top: .42, tilt: 24 },
+    surprised: { w: 3.5, h: 3.8, rr: .4 },
+    sleepy:    { top: .55 },
+    curious:   { L: { w: 3.4, h: 3.5 }, R: { h: 2.9, top: .22, tilt: -6 } },
+    wink:      { R: LINE },
+    thinking:  { top: .22, tilt: 10 },
+    scared:    { w: 2.5, h: 3.4, rr: .4, fx: 'scared' },
+    smug:      { top: .38, bot: .15 },
+    sleep:     { ...LINE, fx: 'sleep' },
+    bored:     { top: .42, bot: .05, h: 2.8, look: [-.9, -.2] },
+    shy:       { top: .18, bot: .28, h: 2.8, y: .1, look: [-.8, .7] },
+    cry:       { top: .3, tilt: -16, h: 2.9, fx: 'cry' },
+  };
+
+  // every animated value is a spring: smooth at any refresh rate, slight natural overshoot
+  const mk = (v) => ({ x: v, v: 0, t: v });
+  const KEYS = ['w', 'h', 'rr', 'top', 'bot', 'tilt', 'y'];
+  const SPR = { w: [240, 20], h: [240, 20], rr: [200, 22], y: [240, 20], top: [300, 24], bot: [300, 24], tilt: [300, 24] };
+  const eyes = [0, 1].map(() => Object.fromEntries(KEYS.map((k) => [k, mk(BASE[k])])));
+  const G = { lx: mk(0), ly: mk(0), blink: mk(0), talk: mk(0), vol: mk(0), fx: mk(0) };
+  let fxName = '', fxWant = '', cur = 'sleep';
+  const hits = [];
+
+  const spring = (s, k, c, dt) => { s.v += (s.t - s.x) * k * dt; s.v *= Math.exp(-c * dt); s.x += s.v * dt; };
+  function stepAll(dt) {
+    for (const e of eyes) for (const k of KEYS) spring(e[k], SPR[k][0], SPR[k][1], dt);
+    spring(G.lx, 70, 15, dt); spring(G.ly, 70, 15, dt);
+    spring(G.blink, 900, 60, dt);
+    spring(G.talk, 400, 30, dt); spring(G.vol, 300, 30, dt);
+    if (fxWant !== fxName) { G.fx.t = 0; if (G.fx.x < .03) fxName = fxWant; } else G.fx.t = fxName ? 1 : 0;
+    spring(G.fx, 120, 18, dt);
+  }
+
+  function settled() {                       // true when nothing is moving: lets us skip drawing
+    if (fxName || fxWant !== fxName) return false;
+    for (const e of eyes) for (const k of KEYS) { const s = e[k]; if (Math.abs(s.t - s.x) > .0005 || Math.abs(s.v) > .0005) return false; }
+    for (const k in G) { const s = G[k]; if (Math.abs(s.t - s.x) > .0005 || Math.abs(s.v) > .0005) return false; }
+    return true;
+  }
+
+  function setEmotion(name) {
+    const e = E[name] || E.neutral;
+    cur = E[name] ? name : 'neutral';
+    eyes.forEach((eye, i) => {
+      const p = { ...BASE, ...e, ...(e[i ? 'R' : 'L'] || {}) };
+      for (const k of KEYS) eye[k].t = p[k];
+    });
+    fxWant = reduceMotion ? '' : (e.fx || '');
+    if (e.look) look(e.look[0], e.look[1]);
+  }
+  const look = (x, y) => { G.lx.t = x; G.ly.t = y; };
+  function caption(t, cls) { cap.textContent = t; cap.className = cls || ''; }
+
+  function rrPath(x, y, w, h, r) {
+    r = Math.max(0, Math.min(r, w / 2, h / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  function drawEye(ex, ey, e, side, sc, fxSY) {
+    const w = e.w.x * U * sc;
+    const h = Math.max(1, e.h.x * U * sc * fxSY * (1 - .94 * clamp(G.blink.x, 0, 1)));
+    ctx.save();
+    ctx.translate(ex, ey + e.y.x * U);
+    rrPath(-w / 2, -h / 2, w, h, Math.min(w, h) / 2 * clamp(e.rr.x, 0, 1));
+    ctx.clip();
+
+    ctx.fillStyle = '#1fe3e8';
+    ctx.fillRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4);
+
+    // eyelids (same colour as the background)
+    ctx.fillStyle = '#000';
+    const top = clamp(e.top.x, 0, 1), bot = clamp(e.bot.x, 0, 1);
+    if (top > .001 || Math.abs(e.tilt.x) > .5) {
+      ctx.save();
+      ctx.translate(0, -h / 2 + top * h);
+      ctx.rotate(e.tilt.x * side * Math.PI / 180);
+      ctx.fillRect(-w * 1.5, -h * 3, w * 3, h * 3 + 1);
+      ctx.restore();
+    }
+    if (bot > .001) {
+      const y0 = h / 2 - bot * h;
+      ctx.beginPath(); ctx.ellipse(0, y0 + h * .45, w * .8, h * .45, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillRect(-w * 1.5, y0 + h * .45, w * 3, h * 2);
+    }
+    ctx.restore();
+    return { x: ex - w / 2, y: ey + e.y.x * U - h / 2, w, h };
+  }
+
+  function draw(t) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+
+    const amp = G.fx.x;
+    let fxX = 0, fxY = 0, fxS = 1, fxSY = 1;
+    if (fxName === 'laugh') fxY = Math.sin(t * 26) * .08 * U * amp;
+    else if (fxName === 'scared') fxX = Math.sin(t * 110) * .035 * U * amp;
+    else if (fxName === 'love') fxS = 1 + amp * .07 * Math.pow(Math.max(0, Math.sin(t * 8)), 3);
+    else if (fxName === 'sleep') fxSY = 1 + amp * .08 * Math.sin(t * 1.6);
+
+    const sc = fxS * (1 + G.talk.x * .05 + G.vol.x * .05);
+    const wL = eyes[0].w.x * U * sc, wR = eyes[1].w.x * U * sc, gap = 1.0 * U * sc;
+    const cx = W / 2 + G.lx.x * U + fxX, cy = H * .46 + G.ly.x * U + fxY;
+    const x0 = cx - (wL + gap + wR) / 2;
+    hits[0] = drawEye(x0 + wL / 2, cy, eyes[0], 1, sc, fxSY);
+    hits[1] = drawEye(x0 + wL + gap + wR / 2, cy, eyes[1], -1, sc, fxSY);
+
+    if (fxName === 'sleep' && amp > .05) {                    // floating z z z
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (let i = 0; i < 3; i++) {
+        const p = (t * .3 + i / 3) % 1;
+        ctx.globalAlpha = Math.sin(p * Math.PI) * .85 * amp;
+        ctx.fillStyle = '#1fe3e8';
+        ctx.font = `700 ${U * (.3 + .4 * p)}px system-ui, sans-serif`;
+        ctx.fillText('z', x0 + wL + gap + wR + U * (.2 + p * .9), cy - U * (.4 + p * 1.7));
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (fxName === 'cry' && amp > .05) {                      // falling teardrops
+      const s = U * .1;
+      for (let k = 0; k < hits.length; k++) {
+        const r = hits[k];
+        for (let i = 0; i < 2; i++) {
+          const p = (t * .55 + i * .5 + k * .27) % 1;
+          const x = r.x + r.w * (k ? .62 : .38) + (i ? s * 1.2 : -s * 1.2) * 0;
+          const y = r.y + r.h * .86 + p * U * 2.2;
+          const a = Math.min(1, p * 8) * (1 - p * p) * amp;        // fades in at the eye, fades out below
+          ctx.globalAlpha = a;
+          ctx.fillStyle = '#7ff1f5';
+          ctx.beginPath();
+          ctx.moveTo(x, y - s * 1.9);
+          ctx.quadraticCurveTo(x + s * .95, y - s * .6, x + s, y);
+          ctx.arc(x, y, s, 0, Math.PI);
+          ctx.quadraticCurveTo(x - s * .95, y - s * .6, x, y - s * 1.9);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,.75)';
+          ctx.beginPath(); ctx.ellipse(x - s * .35, y - s * .1, s * .18, s * .32, 0, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  let lastT = performance.now();
+  (function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min(.05, (now - lastT) / 1000); lastT = now;
+    if (dt <= 0) return;
+    if (settled() && !needDraw) return;     // idle: no CPU/GPU work
+    needDraw = false;
+    const n = Math.ceil(dt / (1 / 120));
+    for (let i = 0; i < n; i++) stepAll(dt / n);
+    draw(now / 1000);
+  })(lastT);
+
+  /* ---------- state ---------- */
+  let awake = false, muted = false, state = 'asleep', rec = null, drowsy = 0;
+  let lastAct = Date.now(), lastPtr = 0, pokes = 0, pokeT = 0, busy = false;
+  const history = [];
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const synth = window.speechSynthesis;
+
+  function setState(s) { state = s; }
+  function markActivity() {
+    lastAct = Date.now();
+    if (drowsy) {
+      drowsy = 0; setEmotion('surprised');
+      setTimeout(() => { if (state === 'listening') setEmotion('neutral'); }, 800);
+      if (state === 'listening') caption('listening…', 'dim');
+    }
+  }
+
+  /* ---------- mic: permission + live level (drives the eye glow) ---------- */
+  let stream = null, analyser = null, vol = 0;
+  async function startMic() {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    (function loop() {
+      analyser.getByteTimeDomainData(buf);
+      let s = 0;
+      for (const v of buf) { const d = (v - 128) / 128; s += d * d; }
+      vol = vol * .7 + Math.min(1, Math.sqrt(s / buf.length) * 6) * .3;
+      if (state === 'listening' && !muted) G.vol.t = vol;
+      else if (state !== 'speaking') G.vol.t = 0;
+      setTimeout(loop, 40);
+    })();
+  }
+
+  /* ---------- listening ---------- */
+  function stopListening() {
+    if (rec) { rec.onend = null; rec.onresult = null; rec.onerror = null; try { rec.abort(); } catch (_) {} rec = null; }
+  }
+  function listen() {
+    if (!awake || muted || busy || state === 'speaking' || state === 'thinking' || rec || !SR) return;
+    const r = new SR();
+    rec = r;
+    r.lang = LANGS[li].code;
+    r.interimResults = true;
+    r.continuous = false;
+    let finalText = '', attended = false;
+    r.onstart = () => { setState('listening'); if (!finalText) caption('listening…', 'dim'); };
+    r.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) finalText += res[0].transcript; else interim += res[0].transcript;
+      }
+      markActivity();
+      caption(finalText + interim, '');
+      if (!attended && cur === 'neutral') { attended = true; setEmotion('curious'); }
+    };
+    r.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        rec = null; awake = false; setState('asleep'); setEmotion('sad');
+        caption('I need the mic to hear you. Allow it in the address bar, then tap me.', 'bot');
+      }
+    };
+    r.onend = () => {
+      rec = null;
+      if (finalText.trim()) ask(finalText.trim());
+      else if (awake && state === 'listening') { if (cur === 'curious') setEmotion('neutral'); setTimeout(listen, 200); }
+    };
+    try { r.start(); } catch (_) { rec = null; }
+  }
+
+  /* ---------- rude / sorry detection ---------- */
+  const RUDE_L = /\b(stupid|idiot|dumb|dumbo|moron|useless|worthless|trash|garbage|loser|ugly|shut\s?up|hate you|you suck|sucks|bastard|bitch|asshole|fuck\w*|shit\w*|crap|fool|bad robot|worst|get lost|go away|pagal|bewakoof|bevkoof|bewakuf|gadha|gadhe|kutta|kutte|nalayak|bakwas|bekar|ghatiya|chup\s?kar|chup\s?ho|chutiya|harami|kamina|saala)\b/i;
+  const RUDE_D = /(बेवकूफ|पागल|गधा|गधे|कुत्ता|कुत्ते|नालायक|बकवास|बेकार|घटिया|चुप\s?कर|चुप\s?हो|चुप\s?बैठ|मूर्ख|वेडा|येडा|गाढव|गप्प\s?बस|गप्प\s?रहा|चूतिया|हरामी|कमीना|साला)/;
+  const SORRY_L = /\b(sorry|apologi[sz]e|maaf|maafi|forgive me)\b/i;
+  const SORRY_D = /(माफ|क्षमा|सॉरी)/;
+  const isRude = (t) => RUDE_L.test(t) || RUDE_D.test(t);
+  const isSorry = (t) => SORRY_L.test(t) || SORRY_D.test(t);
+  let rudeLevel = 0, rudeT = 0;
+
+  /* ---------- talking to the backend ---------- */
+  async function ask(text) {
+    if (busy) return;
+    busy = true;
+    markActivity();
+    stopListening();
+    if (Date.now() - rudeT > 90000) rudeLevel = 0;           // anger cools down
+    let mood = '';
+    if (isRude(text)) { rudeLevel = Math.min(3, rudeLevel + 1); rudeT = Date.now(); mood = 'rude'; }
+    else if (rudeLevel && isSorry(text)) { mood = 'apology'; }
+    setState('thinking');
+    if (mood === 'rude') { setEmotion('angry'); look(0, 0); } else { setEmotion('thinking'); look(.7, -.8); }
+    caption('thinking…', 'dim');
+    const slow = setTimeout(() => { if (state === 'thinking') caption('waking up my brain… (free server, first reply can take a minute)', 'dim'); }, 5000);
+    history.push({ role: 'user', content: text });
+    if (history.length > 14) history.splice(0, history.length - 14);
+    try {
+      const r = await fetch(API_BASE + '/api/chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history, lang: LANGS[li].code, mood, level: rudeLevel }),
+      });
+      if (!r.ok) {
+        let detail = '';
+        try { detail = (await r.json()).detail || ''; } catch (_) {}
+        const err = new Error(detail || ('HTTP ' + r.status));
+        err.status = r.status;
+        throw err;
+      }
+      const d = await r.json();
+      clearTimeout(slow);
+      if (mood === 'apology') rudeLevel = 0;
+      history.push({ role: 'assistant', content: d.reply, emotion: d.emotion, lang: d.lang });
+      busy = false;
+      respond(d);
+    } catch (err) {
+      clearTimeout(slow);
+      busy = false;
+      history.pop();
+      let why;
+      if (err.status === 404 || err.status === 405) why = 'This page is not running on the Nova server. Start it with start.bat and open http://localhost:3000';
+      else if (err.status) why = err.message;
+      else why = 'Cannot reach the Nova server. Is start.bat still running? Open http://localhost:3000, not the html file.';
+      respond({ reply: "I can't reach my brain right now. The reason is on the screen.", emotion: 'sad', lang: 'en-US' });
+      caption(why, 'bot');
+    }
+  }
+
+  /* ---------- speaking ---------- */
+  let token = 0, talkTimer = null;
+  function startTalk() {
+    clearInterval(talkTimer);
+    talkTimer = setInterval(() => {
+      const t = rand(.25, 1);
+      G.talk.t = t; G.vol.t = t * .7;
+      if (Math.random() < .3) look(rand(-.25, .25), rand(-.2, .2));
+    }, 110);
+  }
+  function stopTalk() {
+    clearInterval(talkTimer);
+    G.talk.t = 0; G.vol.t = 0; look(0, 0);
+  }
+  function pickVoice(lang) {
+    const vs = synth.getVoices();
+    const base = lang.split('-')[0];
+    return vs.find((v) => v.lang.replace('_', '-') === lang)
+        || vs.find((v) => v.lang.toLowerCase().startsWith(base))
+        || (base === 'mr' ? vs.find((v) => v.lang.toLowerCase().startsWith('hi')) : null);
+  }
+  function afterSpeak(t) {
+    if (t !== token) return;
+    stopTalk();
+    lastAct = Date.now();
+    setState(muted ? 'idle' : 'listening');
+    setTimeout(() => { if (state === 'listening' && cur !== 'curious') setEmotion('neutral'); }, cur === 'angry' ? 3500 : 1300);
+    listen();
+  }
+  function speak(text, lang) {
+    const t = ++token;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice(lang || 'en-US');
+    u.lang = v ? v.lang : (lang || 'en-US');
+    if (v) u.voice = v;
+    const VOICE = { angry: [.8, 1.12], sad: [.95, .92], cry: [1, .9], laugh: [1.35, 1.1], scared: [1.3, 1.15],
+                    sleepy: [.9, .88], bored: [.9, .9], shy: [1.25, .95], happy: [1.25, 1.05], love: [1.25, .98] };
+    const [pt, rt] = VOICE[cur] || [1.15, 1.03];
+    u.pitch = pt; u.rate = rt;
+    let started = false;
+    u.onstart = () => { started = true; startTalk(); };
+    u.onend = u.onerror = () => afterSpeak(t);
+    synth.speak(u);
+    setTimeout(() => { if (t === token && !started) afterSpeak(t); }, 4000);   // voice never started
+  }
+  function stopSpeak() { const t = ++token; synth.cancel(); afterSpeak(t); }
+
+  function respond(d) {
+    stopListening();
+    markActivity();
+    setState('speaking');
+    setEmotion(d.emotion);
+    look(0, 0);
+    caption(d.reply, 'bot');
+    speak(d.reply, d.lang);
+  }
+
+  /* ---------- wake up ---------- */
+  async function wake() {
+    if (awake) return;
+    awake = true;
+    setEmotion('surprised');
+    caption('');
+    try { await startMic(); }
+    catch (e) {
+      awake = false; setEmotion('sad');
+      caption('I need the mic to hear you. Allow it in the address bar, then tap me.', 'bot');
+      return;
+    }
+    if (!SR) {
+      txt.style.display = 'block';
+      caption("This browser can't do speech recognition. Use Chrome, Edge or Safari, or type to me below.", 'bot');
+    }
+    respond({ reply: LANGS[li].hello, emotion: 'happy', lang: LANGS[li].tts });
+  }
+
+  /* ---------- playing around ---------- */
+  function poke() {
+    if (state === 'speaking') { stopSpeak(); return; }
+    markActivity();
+    const now = Date.now();
+    pokes = now - pokeT < 6000 ? pokes + 1 : 1;
+    pokeT = now;
+    if (pokes >= 4) {
+      pokes = 0;
+      respond({ reply: 'Hey! Stop poking my eyes!', emotion: 'angry', lang: 'en-US' });
+      return;
+    }
+    const e = pick(['laugh', 'surprised', 'wink', 'happy']);
+    setEmotion(e);
+    setTimeout(() => { if (state === 'listening' || state === 'idle') setEmotion('neutral'); }, 1300);
+  }
+  $('#stage').addEventListener('click', (ev) => {
+    if (!awake) { wake(); return; }
+    const onEye = hits.some((r) => r && ev.clientX > r.x - 20 && ev.clientX < r.x + r.w + 20 && ev.clientY > r.y - 20 && ev.clientY < r.y + r.h + 20);
+    if (onEye) poke(); else if (state === 'speaking') stopSpeak();
+  });
+
+  addEventListener('pointermove', (e) => {
+    if (!awake || state === 'thinking' || state === 'speaking') return;
+    lastPtr = Date.now();
+    if (!drowsy) lastAct = lastPtr;
+    look((e.clientX / innerWidth - .5) * 1.8, (e.clientY / innerHeight - .5) * 1.4);
+  });
+
+  (function blink() {
+    setTimeout(blink, rand(2000, 5500));
+    if (!awake) return;
+    const b = () => { G.blink.t = 1; setTimeout(() => { G.blink.t = 0; }, 110); };
+    b();
+    if (Math.random() < .2) setTimeout(b, 260);
+  })();
+
+  (function wander() {
+    setTimeout(wander, rand(2200, 5200));
+    if (!awake || drowsy || state === 'thinking' || state === 'speaking') return;
+    if (Date.now() - lastPtr < 4000) return;
+    look(rand(-1, 1), rand(-.6, .6));
+    if (state === 'listening' && cur === 'neutral' && Math.random() < .22) {
+      const e = pick(['happy', 'curious', 'wink', 'smug']);
+      setEmotion(e);
+      setTimeout(() => { if (cur === e && state === 'listening') setEmotion('neutral'); }, 1500);
+    }
+  })();
+
+  setInterval(() => {                      // gets sleepy when ignored
+    if (!awake || state === 'thinking' || state === 'speaking') return;
+    const idle = Date.now() - lastAct;
+    if (idle > 10000 && drowsy < 2) { drowsy = 2; setEmotion('sleep'); look(0, .3); caption('zzz…  say something to wake me', 'dim'); }
+    else if (idle > 6000 && drowsy < 1) { drowsy = 1; setEmotion('sleepy'); look(0, .4); }
+  }, 1000);
+
+  /* ---------- controls ---------- */
+  btnMic.addEventListener('click', (e) => {
+    e.stopPropagation();
+    muted = !muted;
+    btnMic.textContent = muted ? 'mic off' : 'mic on';
+    btnMic.classList.toggle('off', muted);
+    if (stream) stream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+    if (muted) { stopListening(); if (state === 'listening') setState('idle'); caption('mic muted', 'dim'); }
+    else if (awake) { setState('listening'); listen(); }
+  });
+  btnLang.addEventListener('click', (e) => {
+    e.stopPropagation();
+    li = (li + 1) % LANGS.length;
+    btnLang.textContent = LANGS[li].label;
+    if (awake && state === 'listening') { stopListening(); listen(); }
+  });
+  txt.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && txt.value.trim()) { const v = txt.value.trim(); txt.value = ''; if (!awake) awake = true; ask(v); }
+  });
+  txt.addEventListener('click', (e) => e.stopPropagation());
+
+  if (synth) synth.getVoices();
+  fetch(API_BASE + '/healthz').catch(() => {});   // wake a sleeping free server early
+  setEmotion('sleep');
+})();
+</script>
+</body>
+</html>
